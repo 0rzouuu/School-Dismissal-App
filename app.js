@@ -1,4 +1,4 @@
-// app.js - VISUALLY IMPROVED VERSION WITH BETTER STUDENT DISPLAY
+// app.js - WITH PER-STUDENT UNDO BUTTON (NEXT TO WAITING BUTTON)
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import { getDatabase, ref, push, set, onValue, remove, get, query, orderByChild, limitToLast } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js';
 import { getMessaging, getToken, onMessage, isSupported } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging.js';
@@ -58,7 +58,6 @@ async function checkAndResetForNewDay() {
     try {
         const lastResetRef = ref(db, 'system/lastReset');
         const snapshot = await get(lastResetRef);
-
         const today = new Date().toDateString();
 
         if (!snapshot.exists()) {
@@ -212,26 +211,19 @@ async function loadStudentsFromCSVInternal() {
 
 function extractYearFromClassName(className) {
     className = className.trim();
-
     if (className.toUpperCase().includes('KG')) {
         return className.toUpperCase();
     }
-
     const yearMatch = className.match(/Year\s*(\d+)/i);
     if (yearMatch) {
         return `Year ${yearMatch[1]}`;
     }
-
     return 'Other';
 }
 
 function getYearDisplayName(year) {
-    if (year.includes('KG')) {
-        return year.toUpperCase();
-    }
-    if (year.includes('Year')) {
-        return year;
-    }
+    if (year.includes('KG')) return year.toUpperCase();
+    if (year.includes('Year')) return year;
     return year;
 }
 
@@ -275,16 +267,12 @@ function getCachedStudents() {
         if (!cached) return null;
 
         const cacheData = JSON.parse(cached);
-        const isExpired = Date.now() - cacheData.timestamp > CACHE_EXPIRY;
-
-        if (isExpired) {
+        if (Date.now() - cacheData.timestamp > CACHE_EXPIRY) {
             localStorage.removeItem(STUDENT_CACHE_KEY);
             return null;
         }
-
         return cacheData.students;
     } catch (e) {
-        console.warn('Failed to read cache:', e);
         return null;
     }
 }
@@ -292,7 +280,6 @@ function getCachedStudents() {
 function updateLoadingUI(isLoading) {
     const studentListElement = document.getElementById('student-list');
     if (!studentListElement) return;
-
     if (isLoading) {
         studentListElement.innerHTML = `
             <li class="empty-state">
@@ -304,7 +291,7 @@ function updateLoadingUI(isLoading) {
     }
 }
 
-// ==================== TEACHER PANEL YEAR FILTERS ====================
+// ==================== TEACHER PANEL ====================
 
 function updateYearFilterButtons() {
     const filterContainer = document.getElementById('teacher-filters');
@@ -448,27 +435,72 @@ function renderFilteredPendingList() {
     });
 }
 
-// ==================== ADMIN PANEL - VISUALLY IMPROVED ====================
+// ==================== UNDO FUNCTION ====================
+
+async function undoMarkParent(studentName, buttonElement) {
+    console.log('Undoing parent mark for:', studentName);
+    
+    try {
+        // Find and delete from Firebase
+        const pendingRef = ref(db, 'pendingPickups');
+        const snapshot = await get(pendingRef);
+        
+        if (snapshot.exists()) {
+            const pendingPickups = snapshot.val();
+            let foundKey = null;
+            
+            for (const key in pendingPickups) {
+                if (pendingPickups[key].name === studentName) {
+                    foundKey = key;
+                    break;
+                }
+            }
+            
+            if (foundKey) {
+                await remove(ref(db, `pendingPickups/${foundKey}`));
+                console.log(`🗑️ Removed ${studentName} from pending`);
+            }
+        }
+
+        // Re-enable the original button
+        if (buttonElement) {
+            buttonElement.disabled = false;
+            buttonElement.style.opacity = '1';
+            buttonElement.style.cursor = 'pointer';
+            buttonElement.style.background = 'linear-gradient(135deg, var(--primary), var(--primary-dark))';
+            buttonElement.innerHTML = '<i class="fas fa-user-check"></i> Parent Here';
+            buttonElement.style.minWidth = '160px';
+        }
+
+        // Remove from disabled set
+        disabledStudentButtons.delete(studentName);
+        
+        // Show success message
+        showToast(`↩️ Undo successful - ${studentName} removed`, 'success');
+        
+        // Re-render to update UI
+        renderStudentList(document.getElementById('student-search')?.value || '');
+        
+    } catch (error) {
+        console.error('Error undoing:', error);
+        showToast('Error: Could not undo', 'error');
+    }
+}
+
+// ==================== ADMIN PANEL ====================
 
 async function isStudentAlreadyPending(studentName) {
     try {
         const pendingRef = ref(db, 'pendingPickups');
         const snapshot = await get(pendingRef);
-
         if (!snapshot.exists()) return false;
 
         const pendingPickups = snapshot.val();
-
         for (const key in pendingPickups) {
             if (pendingPickups[key].name === studentName) {
-                return {
-                    isPending: true,
-                    key: key,
-                    data: pendingPickups[key]
-                };
+                return { isPending: true, key: key, data: pendingPickups[key] };
             }
         }
-
         return false;
     } catch (error) {
         console.error('Error checking pending status:', error);
@@ -524,7 +556,7 @@ async function markParentArrived(student, buttonElement) {
         await set(newPickupRef, pickupData);
         console.log('Parent marked successfully:', pickupData);
 
-        showToast(`✅ ${student.name} (${student.year}) marked for pickup!`, 'success');
+        showToast(`✅ ${student.name} marked for pickup!`, 'success');
         playNotificationSound();
 
         updatePendingCount();
@@ -544,7 +576,7 @@ async function markParentArrived(student, buttonElement) {
     }
 }
 
-// ==================== VISUALLY IMPROVED STUDENT RENDERING ====================
+// ==================== VISUALLY IMPROVED STUDENT RENDERING WITH UNDO BUTTON ====================
 
 function renderStudentList(filter = '') {
     const studentListElement = document.getElementById('student-list');
@@ -578,7 +610,7 @@ function renderStudentList(filter = '') {
         return;
     }
 
-    // Group students by year for better organization
+    // Group students by year
     const groupedStudents = {};
     filteredStudents.forEach(student => {
         const year = student.year;
@@ -608,7 +640,7 @@ function renderStudentList(filter = '') {
 
     const fragment = document.createDocumentFragment();
 
-    // Add search result summary if searching
+    // Search result summary
     if (filter) {
         const summaryLi = document.createElement('li');
         summaryLi.className = 'list-item';
@@ -668,48 +700,99 @@ function renderStudentList(filter = '') {
                 disabledStudentButtons.add(student.name);
             }
 
-            li.innerHTML = `
-                <div class="student-info">
-                    <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px;">
-                        <div style="width: 40px; height: 40px; border-radius: 50%; background: ${getYearColor(student.year)}20; display: flex; align-items: center; justify-content: center;">
-                            <i class="fas fa-user-graduate" style="color: ${getYearColor(student.year)}; font-size: 1.1rem;"></i>
+           // Create the buttons container
+const buttonsContainer = document.createElement('div');
+buttonsContainer.style.display = 'flex';
+buttonsContainer.style.gap = '8px';
+buttonsContainer.style.alignItems = 'center';
+
+// Main action button (Parent Here or Waiting)
+const actionButton = document.createElement('button');
+actionButton.className = `btn ${isPending || isButtonDisabled ? 'btn-secondary' : 'btn-primary'}`;
+actionButton.setAttribute('data-student-id', student.id);
+actionButton.setAttribute('data-student-name', student.name);
+if (isPending || isButtonDisabled) {
+    actionButton.disabled = true;
+    actionButton.style.opacity = '0.7';
+    actionButton.style.cursor = 'not-allowed';
+    actionButton.style.background = 'var(--gray)';
+    actionButton.style.minWidth = '160px';
+    actionButton.innerHTML = '<i class="fas fa-clock"></i> Waiting for Release';
+} else {
+    actionButton.style.minWidth = '160px';
+    actionButton.style.background = 'linear-gradient(135deg, var(--primary), var(--primary-dark))';
+    actionButton.innerHTML = '<i class="fas fa-user-check"></i> Parent Here';
+}
+
+// UNDO button - ONLY show if student is pending - NOW ON THE LEFT!
+if (isPending) {
+    const undoButton = document.createElement('button');
+    undoButton.className = 'btn';
+    undoButton.style.background = '#ef4444';
+    undoButton.style.color = 'white';
+    undoButton.style.minWidth = '80px';
+    undoButton.style.padding = '8px 12px';
+    undoButton.style.fontSize = '0.8rem';
+    undoButton.style.fontWeight = '600';
+    undoButton.style.border = 'none';
+    undoButton.style.borderRadius = '8px';
+    undoButton.style.cursor = 'pointer';
+    undoButton.style.display = 'flex';
+    undoButton.style.alignItems = 'center';
+    undoButton.style.gap = '6px';
+    undoButton.style.boxShadow = '0 2px 4px rgba(239, 68, 68, 0.3)';
+    undoButton.innerHTML = '<i class="fas fa-undo-alt"></i> UNDO';
+    
+    undoButton.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await undoMarkParent(student.name, actionButton);
+    });
+    
+    // 👈🏽 UNDO ON THE LEFT!
+    buttonsContainer.appendChild(undoButton);
+    buttonsContainer.appendChild(actionButton);
+} else {
+    buttonsContainer.appendChild(actionButton);
+}
+
+            // Student info div
+            const studentInfoDiv = document.createElement('div');
+            studentInfoDiv.className = 'student-info';
+            studentInfoDiv.innerHTML = `
+                <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px;">
+                    <div style="width: 40px; height: 40px; border-radius: 50%; background: ${getYearColor(student.year)}20; display: flex; align-items: center; justify-content: center;">
+                        <i class="fas fa-user-graduate" style="color: ${getYearColor(student.year)}; font-size: 1.1rem;"></i>
+                    </div>
+                    <div>
+                        <div class="student-name" style="font-size: 1.2rem; font-weight: 600; color: var(--dark);">
+                            ${student.name}
                         </div>
-                        <div>
-                            <div class="student-name" style="font-size: 1.2rem; font-weight: 600; color: var(--dark);">
-                                ${student.name}
-                            </div>
-                            <div style="display: flex; gap: 8px; align-items: center;">
-                                <span class="student-class" style="background: ${getYearColor(student.year)}; padding: 4px 12px; border-radius: 20px; color: white; font-size: 0.8rem; font-weight: 600;">
-                                    ${student.class}
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <span class="student-class" style="background: ${getYearColor(student.year)}; padding: 4px 12px; border-radius: 20px; color: white; font-size: 0.8rem; font-weight: 600;">
+                                ${student.class}
+                            </span>
+                            ${isPending ? `
+                                <span style="display: flex; align-items: center; gap: 4px; color: #dc2626; font-size: 0.8rem; font-weight: 600;">
+                                    <i class="fas fa-exclamation-circle"></i>
+                                    Waiting
                                 </span>
-                                ${isPending ? `
-                                    <span style="display: flex; align-items: center; gap: 4px; color: #dc2626; font-size: 0.8rem; font-weight: 600;">
-                                        <i class="fas fa-exclamation-circle"></i>
-                                        Waiting for release
-                                    </span>
-                                ` : ''}
-                            </div>
+                            ` : ''}
                         </div>
                     </div>
                 </div>
-                <button class="btn ${isPending || isButtonDisabled ? 'btn-secondary' : 'btn-primary'} arrival-btn" 
-                        data-student-id="${student.id}"
-                        data-student-name="${student.name}"
-                        ${isPending || isButtonDisabled ? 'disabled' : ''}
-                        style="${isPending || isButtonDisabled ? 'opacity: 0.7; cursor: not-allowed; background: var(--gray); min-width: 160px;' : 'min-width: 160px; background: linear-gradient(135deg, var(--primary), var(--primary-dark));'}">
-                    <i class="fas ${isPending || isButtonDisabled ? 'fa-clock' : 'fa-user-check'}"></i>
-                    ${isPending || isButtonDisabled ? 'Waiting for Release' : 'Parent Here'}
-                </button>
             `;
 
-            const button = li.querySelector('.arrival-btn');
+            li.appendChild(studentInfoDiv);
+            li.appendChild(buttonsContainer);
             
+            // Add click event for Parent Here button if not disabled
             if (!isPending && !isButtonDisabled) {
-                button.addEventListener('click', async (e) => {
+                actionButton.addEventListener('click', async (e) => {
                     e.preventDefault();
                     e.stopPropagation();
                     
-                    if (button.disabled) return;
+                    if (actionButton.disabled) return;
                     
                     const now = Date.now();
                     const lastClick = clickCooldown.get(student.name);
@@ -726,17 +809,15 @@ function renderStudentList(filter = '') {
                         showToast(`❌ ${student.name} is already waiting (${waitTime} minutes)`, 'warning');
                         
                         disabledStudentButtons.add(student.name);
-                        button.disabled = true;
-                        button.style.opacity = '0.7';
-                        button.style.cursor = 'not-allowed';
-                        button.innerHTML = '<i class="fas fa-clock"></i> Waiting for Release';
+                        actionButton.disabled = true;
+                        actionButton.style.opacity = '0.7';
+                        actionButton.style.cursor = 'not-allowed';
+                        actionButton.innerHTML = '<i class="fas fa-clock"></i> Waiting for Release';
                         return;
                     }
 
-                    await markParentArrived(student, button);
+                    await markParentArrived(student, actionButton);
                 });
-            } else {
-                button.disabled = true;
             }
 
             fragment.appendChild(li);
@@ -748,21 +829,12 @@ function renderStudentList(filter = '') {
 
 // Helper functions for visual styling
 function getYearColor(year) {
-    if (year.includes('KG')) {
-        return '#f59e0b'; // Orange for KG
-    }
+    if (year.includes('KG')) return '#f59e0b';
     if (year.includes('Year')) {
         const yearNum = parseInt(year.replace(/\D/g, ''));
         const colors = [
-            '#3b82f6', // Year 1 - Blue
-            '#10b981', // Year 2 - Green
-            '#8b5cf6', // Year 3 - Purple
-            '#ec4899', // Year 4 - Pink
-            '#ef4444', // Year 5 - Red
-            '#14b8a6', // Year 6 - Teal
-            '#f97316', // Year 7 - Orange
-            '#6366f1', // Year 8 - Indigo
-            '#6b7280'  // Year 9 - Gray
+            '#3b82f6', '#10b981', '#8b5cf6', '#ec4899', '#ef4444',
+            '#14b8a6', '#f97316', '#6366f1', '#6b7280'
         ];
         return colors[yearNum - 1] || '#64748b';
     }
@@ -770,21 +842,12 @@ function getYearColor(year) {
 }
 
 function getYearIcon(year) {
-    if (year.includes('KG')) {
-        return 'fa-child';
-    }
+    if (year.includes('KG')) return 'fa-child';
     if (year.includes('Year')) {
         const yearNum = parseInt(year.replace(/\D/g, ''));
         const icons = [
-            'fa-star',      // Year 1
-            'fa-rocket',    // Year 2
-            'fa-flask',     // Year 3
-            'fa-book',      // Year 4
-            'fa-globe',     // Year 5
-            'fa-calculator', // Year 6
-            'fa-flask',     // Year 7
-            'fa-music',     // Year 8
-            'fa-graduation-cap' // Year 9
+            'fa-star', 'fa-rocket', 'fa-flask', 'fa-book', 'fa-globe',
+            'fa-calculator', 'fa-flask', 'fa-music', 'fa-graduation-cap'
         ];
         return icons[yearNum - 1] || 'fa-user-graduate';
     }
@@ -1049,7 +1112,6 @@ function setupSearch() {
         }, 300);
     });
     
-    // Add placeholder improvement
     searchInput.placeholder = '🔍 Search by student name, class, or year...';
 }
 
@@ -1065,7 +1127,7 @@ window.forceResetForNewDay = async function() {
 // ==================== INITIALIZATION ====================
 
 document.addEventListener('DOMContentLoaded', () => {
-    console.log('DOM loaded, initializing app...');
+    console.log('DOM loaded, initializing app with PER-STUDENT UNDO...');
     
     checkAndResetForNewDay().catch(console.error);
     loadStudentsFromCSV().catch(console.error);
@@ -1081,14 +1143,12 @@ document.addEventListener('DOMContentLoaded', () => {
         setInterval(cleanupClickCooldown, 60000);
         setInterval(checkAndResetForNewDay, 60 * 60 * 1000);
         
-        console.log('App initialized');
+        console.log('App initialized - PER-STUDENT UNDO ready!');
     }, 100);
 });
 
 function updateOnlineStatus() {
     const isOnline = navigator.onLine;
-    console.log('Online status:', isOnline ? 'Online' : 'Offline');
-
     if (!isOnline) {
         showToast('You are offline. Data may not sync.', 'warning');
     }
@@ -1105,4 +1165,4 @@ window.clearStudentCache = () => {
     loadStudentsFromCSV();
 };
 
-console.log('App.js loaded successfully - VISUALLY IMPROVED VERSION');
+console.log('✅ App loaded - Each waiting student has its own UNDO button!');
