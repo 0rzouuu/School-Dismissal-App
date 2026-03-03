@@ -1,4 +1,4 @@
-// app.js - COMPLETE WITH CORRECT RELEASE LOGIC (Student stays hidden after release)
+// app.js - COMPLETE WITH CORRECT RELEASE LOGIC AND MEMORY STORAGE
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import { getDatabase, ref, push, set, onValue, remove, get, query, orderByChild, limitToLast } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js';
 import { getMessaging, getToken, onMessage, isSupported } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging.js';
@@ -25,6 +25,9 @@ let messaging = null;
 const STUDENT_CACHE_KEY = 'maarif_students_cache';
 const CACHE_EXPIRY = 5 * 60 * 1000;
 
+// ✅ NEW: Key for storing released students in memory
+const RELEASED_MEMORY_KEY = 'maarif_released';
+
 const clickCooldown = new Map();
 const COOLDOWN_TIME = 3000;
 
@@ -42,6 +45,32 @@ let disabledStudentButtons = new Set();
 
 // Track which students have been released (stay hidden)
 let releasedStudentsToday = new Set();
+
+// ✅ NEW: Memory storage functions
+function saveReleasedToMemory() {
+    try {
+        const releasedArray = Array.from(releasedStudentsToday);
+        localStorage.setItem(RELEASED_MEMORY_KEY, JSON.stringify(releasedArray));
+        console.log(`💾 Saved ${releasedArray.length} released students to memory`);
+    } catch (e) {
+        console.warn('Failed to save to memory:', e);
+    }
+}
+
+function loadReleasedFromMemory() {
+    try {
+        const saved = localStorage.getItem(RELEASED_MEMORY_KEY);
+        if (saved) {
+            const releasedArray = JSON.parse(saved);
+            releasedStudentsToday = new Set(releasedArray);
+            console.log(`📝 Loaded ${releasedArray.length} released students from memory`);
+            return true;
+        }
+    } catch (e) {
+        console.warn('Failed to load from memory:', e);
+    }
+    return false;
+}
 
 // Check if messaging is supported
 (async() => {
@@ -77,6 +106,8 @@ async function checkAndResetForNewDay() {
             await set(lastResetRef, { date: today, timestamp: Date.now() });
             disabledStudentButtons.clear();
             releasedStudentsToday.clear(); // Clear released students for new day
+            // ✅ NEW: Clear memory for new day
+            localStorage.removeItem(RELEASED_MEMORY_KEY);
             showToast('🔄 System reset for new day - All students available', 'success');
         }
     } catch (error) {
@@ -995,6 +1026,9 @@ async function releaseStudent(key, studentName) {
             // Add to released students set (so they stay hidden from Admin Panel)
             releasedStudentsToday.add(studentName);
             
+            // ✅ NEW: Save to memory so it persists after refresh
+            saveReleasedToMemory();
+            
             // Remove from disabled set so button resets
             disabledStudentButtons.delete(studentName);
             
@@ -1196,6 +1230,9 @@ window.forceResetForNewDay = async function() {
 document.addEventListener('DOMContentLoaded', () => {
     console.log('DOM loaded, initializing app with CORRECT RELEASE LOGIC...');
     
+    // ✅ NEW: Load from memory FIRST (instant!)
+    loadReleasedFromMemory();
+    
     checkAndResetForNewDay().catch(console.error);
     loadStudentsFromCSV().catch(console.error);
     
@@ -1229,6 +1266,8 @@ window.renderStudentList = renderStudentList;
 window.students = students;
 window.clearStudentCache = () => {
     localStorage.removeItem(STUDENT_CACHE_KEY);
+    // ✅ NEW: Also clear released memory
+    localStorage.removeItem(RELEASED_MEMORY_KEY);
     studentLoadPromise = null;
     loadStudentsFromCSV();
 };
