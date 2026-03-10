@@ -1,4 +1,4 @@
-// app.js - WITH DROPDOWN FILTER (CLEAN & COMPACT)
+// app.js - SMOOTH VERSION WITH ADMIN UNDO & COLOR CODING
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import { getDatabase, ref, push, set, onValue, remove, get } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js';
 
@@ -26,6 +26,7 @@ const CLASSES = [
 
 // Teacher filter - default to 'all'
 let teacherFilter = 'all';
+let historyFilter = 'all';
 let savedTeacherClass = localStorage.getItem('maarif_teacher_class');
 if (savedTeacherClass && savedTeacherClass !== 'all') {
     teacherFilter = savedTeacherClass;
@@ -190,66 +191,68 @@ const STUDENTS = [
 
 // ==================== STATE ====================
 const RELEASED_MEMORY_KEY = 'maarif_released';
+const ABSENT_MEMORY_KEY = 'maarif_absent';
 let allPendingPickups = [];
+let allHistoryItems = [];
 let releasedStudentsToday = new Set();
-let disabledStudentButtons = new Set();
+let absentStudentsToday = new Set();
 let pendingReleaseKey = null;
 let pendingReleaseData = null;
 
-// Load released from memory
+// Load released and absent from memory
 try {
     const saved = localStorage.getItem(RELEASED_MEMORY_KEY);
     if (saved) releasedStudentsToday = new Set(JSON.parse(saved));
+
+    const savedAbsent = localStorage.getItem(ABSENT_MEMORY_KEY);
+    if (savedAbsent) {
+        const today = new Date().toDateString();
+        const lastReset = localStorage.getItem('maarif_last_reset');
+        if (lastReset === today) {
+            absentStudentsToday = new Set(JSON.parse(savedAbsent));
+        } else {
+            localStorage.removeItem(ABSENT_MEMORY_KEY);
+        }
+    }
 } catch (e) {}
 
-// ==================== DROPDOWN FILTER (CLEAN & COMPACT) ====================
+// ==================== DROPDOWN FILTER ====================
 function renderTeacherFilter() {
     const container = document.getElementById('teacher-filter-container');
     if (!container) return;
 
-    // Count pickups per class
     const classCounts = {};
     allPendingPickups.forEach(([_, p]) => {
-        const className = p.class;
-        classCounts[className] = (classCounts[className] || 0) + 1;
+        if (p && p.class) {
+            classCounts[p.class] = (classCounts[p.class] || 0) + 1;
+        }
     });
 
-    // Get display text for current filter
-    let currentDisplay = 'All Classes';
-    if (teacherFilter !== 'all') {
-        currentDisplay = teacherFilter;
-    }
-
     let options = '<option value="all">📋 All Classes</option>';
-
-    // Sort classes in correct order
     const sortedClasses = [...CLASSES].sort((a, b) => {
         const aKG = a.includes('KG'),
             bKG = b.includes('KG');
         const aYear = a.includes('Year'),
             bYear = b.includes('Year');
-
         if (aKG && bKG) return a.localeCompare(b);
         if (aKG) return -1;
         if (bKG) return 1;
         if (aYear && bYear) {
-            const aNum = parseInt(a.replace(/\D/g, ''));
-            const bNum = parseInt(b.replace(/\D/g, ''));
-            return aNum - bNum;
+            return parseInt(a.replace(/\D/g, '')) - parseInt(b.replace(/\D/g, ''));
         }
         return 0;
     });
 
     sortedClasses.forEach(className => {
-        const count = classCounts[className] || 0;
         const hasStudents = STUDENTS.some(s => s.class.toLowerCase() === className.toLowerCase());
         if (hasStudents) {
+            const count = classCounts[className] || 0;
             const selected = teacherFilter === className ? 'selected' : '';
             options += `<option value="${className}" ${selected}>${className} (${count})</option>`;
         }
     });
 
-    const html = `
+    container.innerHTML = `
         <div class="filter-dropdown-wrapper">
             <label for="class-filter" class="filter-label">
                 <i class="fas fa-filter"></i> Show:
@@ -259,8 +262,6 @@ function renderTeacherFilter() {
             </select>
         </div>
     `;
-
-    container.innerHTML = html;
 }
 
 window.setTeacherFilter = function(filter) {
@@ -268,16 +269,45 @@ window.setTeacherFilter = function(filter) {
     localStorage.setItem('maarif_teacher_class', filter);
     renderTeacherFilter();
     renderFilteredPendingList();
+    renderHistoryList();
+};
+
+// ==================== HISTORY FILTER ====================
+function renderHistoryFilter() {
+    const container = document.getElementById('history-filter-container');
+    if (!container) return;
+
+    const releasedCount = allHistoryItems.filter(item => item && item.status === 'released').length;
+    const absentCount = allHistoryItems.filter(item => item && item.status === 'absent').length;
+
+    container.innerHTML = `
+        <div class="history-filter-wrapper">
+            <button class="history-filter-btn ${historyFilter === 'all' ? 'active' : ''}" onclick="setHistoryFilter('all')">
+                <i class="fas fa-list-ul"></i> All <span class="filter-count">${allHistoryItems.length}</span>
+            </button>
+            <button class="history-filter-btn released-filter ${historyFilter === 'released' ? 'active' : ''}" onclick="setHistoryFilter('released')">
+                <i class="fas fa-check-circle"></i> Released <span class="filter-count">${releasedCount}</span>
+            </button>
+            <button class="history-filter-btn absent-filter ${historyFilter === 'absent' ? 'active' : ''}" onclick="setHistoryFilter('absent')">
+                <i class="fas fa-calendar-times"></i> Absent <span class="filter-count">${absentCount}</span>
+            </button>
+        </div>
+    `;
+}
+
+window.setHistoryFilter = function(filter) {
+    historyFilter = filter;
+    renderHistoryFilter();
+    renderHistoryList();
 };
 
 // ==================== CONFIRMATION DIALOG FUNCTIONS ====================
 function showReleaseConfirmation(key, data) {
     pendingReleaseKey = key;
-    pendingReleaseData = data;
+    pendingReleaseData = {...data, status: 'released' };
 
     const found = allPendingPickups.find(([k]) => k === key);
     let waitTime = 1;
-
     if (found && found[1] && found[1].timestamp) {
         waitTime = Math.max(1, Math.round((Date.now() - found[1].timestamp) / 60000));
     }
@@ -286,46 +316,170 @@ function showReleaseConfirmation(key, data) {
     document.getElementById('confirm-student-class').textContent = data.class;
     document.getElementById('confirm-wait-time').textContent = waitTime + ' minutes';
     document.getElementById('confirm-arrival-time').textContent = data.arrivedAt || 'Unknown';
-
     document.getElementById('confirmation-modal').style.display = 'flex';
 }
+
+function showAbsentConfirmation(key, data) {
+    pendingReleaseKey = key;
+    pendingReleaseData = {...data, status: 'absent' };
+
+    document.getElementById('absent-student-name').textContent = data.name;
+    document.getElementById('absent-student-class').textContent = data.class;
+    document.getElementById('absent-modal').style.display = 'flex';
+}
+
 window.showReleaseConfirmation = showReleaseConfirmation;
+window.showAbsentConfirmation = showAbsentConfirmation;
 
-function setupConfirmationDialog() {
-    const modal = document.getElementById('confirmation-modal');
-    const cancelBtn = document.getElementById('confirm-cancel');
-    const confirmBtn = document.getElementById('confirm-release');
-
-    cancelBtn.addEventListener('click', () => {
-        modal.style.display = 'none';
+function setupConfirmationDialogs() {
+    // Release modal
+    const releaseModal = document.getElementById('confirmation-modal');
+    document.getElementById('confirm-cancel').addEventListener('click', () => {
+        releaseModal.style.display = 'none';
         pendingReleaseKey = null;
         pendingReleaseData = null;
     });
-
-    confirmBtn.addEventListener('click', async() => {
+    document.getElementById('confirm-release').addEventListener('click', async() => {
         if (pendingReleaseKey && pendingReleaseData) {
-            modal.style.display = 'none';
-            await releaseStudent(pendingReleaseKey, pendingReleaseData.name);
+            releaseModal.style.display = 'none';
+            await releaseStudent(pendingReleaseKey, pendingReleaseData);
             pendingReleaseKey = null;
             pendingReleaseData = null;
         }
     });
 
+    // Absent modal
+    const absentModal = document.getElementById('absent-modal');
+    document.getElementById('absent-cancel').addEventListener('click', () => {
+        absentModal.style.display = 'none';
+        pendingReleaseKey = null;
+        pendingReleaseData = null;
+    });
+    document.getElementById('confirm-absent').addEventListener('click', async() => {
+        if (pendingReleaseKey && pendingReleaseData) {
+            absentModal.style.display = 'none';
+            await releaseStudent(pendingReleaseKey, pendingReleaseData);
+            pendingReleaseKey = null;
+            pendingReleaseData = null;
+        }
+    });
+
+    // Reset modal
+    const resetModal = document.getElementById('reset-modal');
+    const resetBtn = document.getElementById('reset-btn');
+    const confirmResetBtn = document.getElementById('confirm-reset');
+    const cancelResetBtn = document.getElementById('cancel-reset');
+
+    if (resetBtn) {
+        resetBtn.addEventListener('click', () => {
+            resetModal.style.display = 'flex';
+        });
+    }
+
+    if (cancelResetBtn) {
+        cancelResetBtn.addEventListener('click', () => {
+            resetModal.style.display = 'none';
+        });
+    }
+
+    if (confirmResetBtn) {
+        confirmResetBtn.addEventListener('click', async() => {
+            resetModal.style.display = 'none';
+            await resetApp();
+        });
+    }
+
+    // Close on Escape or outside click
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && modal.style.display === 'flex') {
-            modal.style.display = 'none';
+        if (e.key === 'Escape') {
+            releaseModal.style.display = 'none';
+            absentModal.style.display = 'none';
+            if (resetModal) resetModal.style.display = 'none';
+        }
+    });
+
+    releaseModal.addEventListener('click', (e) => {
+        if (e.target === releaseModal) {
+            releaseModal.style.display = 'none';
             pendingReleaseKey = null;
             pendingReleaseData = null;
         }
     });
 
-    modal.addEventListener('click', (e) => {
-        if (e.target === modal) {
-            modal.style.display = 'none';
+    absentModal.addEventListener('click', (e) => {
+        if (e.target === absentModal) {
+            absentModal.style.display = 'none';
             pendingReleaseKey = null;
             pendingReleaseData = null;
         }
     });
+
+    if (resetModal) {
+        resetModal.addEventListener('click', (e) => {
+            if (e.target === resetModal) {
+                resetModal.style.display = 'none';
+            }
+        });
+    }
+}
+
+// ==================== ACTIONS ====================
+window.markParentArrived = async function(name, className, year) {
+    try {
+        await set(push(ref(db, 'pendingPickups')), {
+            name,
+            class: className,
+            year,
+            timestamp: Date.now(),
+            arrivedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        });
+        showToast(`✅ ${name} marked`, 'success');
+    } catch (error) {
+        showToast('❌ Error', 'error');
+    }
+};
+
+window.undoMarkParent = async function(name) {
+    const pending = allPendingPickups.find(([_, p]) => p && p.name === name);
+    if (pending) {
+        await remove(ref(db, `pendingPickups/${pending[0]}`));
+        showToast(`↩️ Undo ${name}`, 'info');
+    }
+};
+
+async function releaseStudent(key, data) {
+    try {
+        const snapshot = await get(ref(db, `pendingPickups/${key}`));
+        if (snapshot.exists()) {
+            const record = snapshot.val();
+            record.status = data.status;
+            record.timestamp = Date.now();
+            record.time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+            // Move to history
+            await set(ref(db, `history/${key}`), record);
+            await remove(ref(db, `pendingPickups/${key}`));
+
+            // Update local state
+            if (data.status === 'released') {
+                releasedStudentsToday.add(record.name);
+                localStorage.setItem(RELEASED_MEMORY_KEY, JSON.stringify([...releasedStudentsToday]));
+                showToast(`✅ ${record.name} released`, 'success');
+            } else {
+                absentStudentsToday.add(record.name);
+                localStorage.setItem(ABSENT_MEMORY_KEY, JSON.stringify([...absentStudentsToday]));
+                localStorage.setItem('maarif_last_reset', new Date().toDateString());
+                showToast(`📝 ${record.name} marked absent`, 'info');
+            }
+
+            // FORCE IMMEDIATE UI UPDATE - THIS IS THE KEY PART
+            renderStudentList(); // Remove from admin panel
+            renderFilteredPendingList(); // Remove from teacher panel
+            renderHistoryList(); // Add to history
+        }
+    } catch (error) {
+        showToast('❌ Error', 'error');
+    }
 }
 
 // ==================== RENDER FUNCTIONS ====================
@@ -333,23 +487,23 @@ function renderStudentList() {
     const list = document.getElementById('student-list');
     if (!list) return;
 
-    let filtered = STUDENTS.filter(s => !releasedStudentsToday.has(s.name));
+    // Filter out students who are already released OR absent
+    const availableStudents = STUDENTS.filter(s =>
+        !releasedStudentsToday.has(s.name) && !absentStudentsToday.has(s.name)
+    );
 
-    if (filtered.length === 0) {
-        list.innerHTML = '<li class="empty-state"><i class="fas fa-users"></i><h3>No students available</h3></li>';
+    if (availableStudents.length === 0) {
+        list.innerHTML = '<li class="empty-state"><i class="fas fa-users"></i><h3>No students available</h3><p>All students have been processed</p></li>';
         return;
     }
 
-    // Count pending per year for Admin Panel
     const pendingCounts = {};
     allPendingPickups.forEach(([_, p]) => {
-        const year = p.year;
-        pendingCounts[year] = (pendingCounts[year] || 0) + 1;
+        if (p && p.year) pendingCounts[p.year] = (pendingCounts[p.year] || 0) + 1;
     });
 
-    let html = '';
     const groups = {};
-    filtered.forEach(s => {
+    availableStudents.forEach(s => {
         if (!groups[s.year]) groups[s.year] = [];
         groups[s.year].push(s);
     });
@@ -359,69 +513,65 @@ function renderStudentList() {
             bKG = b.includes('KG');
         const aYear = a.includes('Year'),
             bYear = b.includes('Year');
-
         if (aKG && bKG) return a.localeCompare(b);
         if (aKG) return -1;
         if (bKG) return 1;
         if (aYear && bYear) {
-            const aNum = parseInt(a.replace(/\D/g, ''));
-            const bNum = parseInt(b.replace(/\D/g, ''));
-            return aNum - bNum;
+            return parseInt(a.replace(/\D/g, '')) - parseInt(b.replace(/\D/g, ''));
         }
         return 0;
     });
 
+    let html = '';
     years.forEach(year => {
                 const pendingCount = pendingCounts[year] || 0;
                 const pendingBadge = pendingCount > 0 ?
-                    `<span class="year-pending-badge">${pendingCount} waiting</span>` : '';
+                    `<span class="year-pending-badge"><i class="fas fa-clock"></i> ${pendingCount} waiting</span>` : '';
 
-                html += `<li class="list-item" style="background:var(--light);border-left:6px solid ${getYearColor(year)};margin-top:15px">
+                html += `<li class="list-item year-header" style="background:var(--light);border-left:6px solid ${getYearColor(year)};margin-top:15px">
             <div style="display:flex;justify-content:space-between;align-items:center;width:100%">
                 <div style="display:flex;align-items:center;gap:10px">
                     <i class="fas ${getYearIcon(year)}" style="color:${getYearColor(year)}"></i>
-                    <span style="font-weight:700">${year}</span>
+                    <span style="font-weight:700; font-size:1.1rem;">${year}</span>
                     ${pendingBadge}
                 </div>
-                <span style="background:white;padding:4px 12px;border-radius:20px;color:${getYearColor(year)};font-weight:600">
-                    ${groups[year].length}
+                <span class="year-count" style="background:white;padding:4px 12px;border-radius:20px;color:${getYearColor(year)};font-weight:600">
+                    <i class="fas fa-users"></i> ${groups[year].length}
                 </span>
             </div>
         </li>`;
 
                 groups[year].forEach(s => {
-                            const isPending = allPendingPickups.some(([_, p]) => p.name === s.name);
-                            html += `
-                <li class="list-item">
-                    <div class="student-info">
-                        <div style="display:flex;align-items:center;gap:12px">
-                            <div style="width:40px;height:40px;border-radius:50%;background:${getYearColor(s.year)}20;display:flex;align-items:center;justify-content:center">
-                                <i class="fas fa-user-graduate" style="color:${getYearColor(s.year)}"></i>
-                            </div>
-                            <div>
-                                <div class="student-name">${s.name}</div>
-                                <span class="student-class" style="background:${getYearColor(s.year)}">${s.class}</span>
-                                ${isPending ? '<span style="color:#dc2626;margin-left:8px"><i class="fas fa-exclamation-circle"></i> Waiting</span>' : ''}
-                            </div>
+                            const isPending = allPendingPickups.some(([_, p]) => p && p.name === s.name);
+
+                            html += `<li class="list-item ${isPending ? 'pending-item' : ''}">
+                <div class="student-info">
+                    <div style="display:flex;align-items:center;gap:12px">
+                        <div class="student-avatar" style="width:40px;height:40px;border-radius:50%;background:${getYearColor(s.year)}20;display:flex;align-items:center;justify-content:center">
+                            <i class="fas fa-user-graduate" style="color:${getYearColor(s.year)}"></i>
+                        </div>
+                        <div>
+                            <div class="student-name">${s.name}</div>
+                            <span class="student-class" style="background:${getYearColor(s.year)}">${s.class}</span>
+                            ${isPending ? '<span class="pending-badge"><i class="fas fa-exclamation-circle"></i> Waiting</span>' : ''}
                         </div>
                     </div>
-                    <div style="display:flex;gap:8px">
-                        ${isPending ? `
-                            <button class="btn" style="background:#ef4444;color:white;min-width:80px" onclick="undoMarkParent('${s.name}')">
-                                <i class="fas fa-undo-alt"></i> UNDO
-                            </button>
-                        ` : ''}
-                        <button class="btn ${isPending ? 'btn-secondary' : 'btn-primary'}" 
-                            ${isPending ? 'disabled' : ''}
-                            onclick="markParentArrived('${s.name}', '${s.class}', '${s.year}')">
-                            ${isPending ? '<i class="fas fa-clock"></i> Waiting' : '<i class="fas fa-user-check"></i> Parent Here'}
+                </div>
+                <div class="action-buttons" style="display:flex;gap:8px;flex-wrap:wrap;">
+                    ${isPending ? `
+                        <button class="btn btn-undo" onclick="undoMarkParent('${s.name}')">
+                            <i class="fas fa-undo-alt"></i> Undo
                         </button>
-                    </div>
-                </li>
-            `;
+                    ` : ''}
+                    <button class="btn ${isPending ? 'btn-disabled' : 'btn-arrived'}" 
+                        ${isPending ? 'disabled' : ''} 
+                        onclick="markParentArrived('${s.name}', '${s.class}', '${s.year}')">
+                        ${isPending ? '<i class="fas fa-clock"></i> Waiting' : '<i class="fas fa-user-check"></i> Parent Here'}
+                    </button>
+                </div>
+            </li>`;
         });
     });
-    
     list.innerHTML = html;
 }
 
@@ -429,69 +579,96 @@ function renderFilteredPendingList() {
     const list = document.getElementById('pending-list');
     if (!list) return;
 
-    // Apply teacher filter
-    let filteredPickups = allPendingPickups;
+    let filtered = allPendingPickups;
     if (teacherFilter !== 'all') {
-        filteredPickups = allPendingPickups.filter(([_, p]) => 
-            p.class.toLowerCase() === teacherFilter.toLowerCase()
+        filtered = allPendingPickups.filter(([_, p]) => 
+            p && p.class && p.class.toLowerCase() === teacherFilter.toLowerCase()
         );
     }
 
-    if (filteredPickups.length === 0) {
-        list.innerHTML = `<li class="empty-state"><i class="fas fa-check-circle"></i><h3>No Pending Pickups</h3><p>When parents arrive, they'll appear here</p></li>`;
+    if (filtered.length === 0) {
+        list.innerHTML = '<li class="empty-state"><i class="fas fa-check-circle"></i><h3>No Pending Pickups</h3><p>When parents arrive, they\'ll appear here</p></li>';
         return;
     }
 
     let html = '';
-    filteredPickups.forEach(([key, p]) => {
+    filtered.forEach(([key, p]) => {
+        if (!p) return;
         const waitTime = Math.max(1, Math.round((Date.now() - p.timestamp) / 60000));
-        const safeName = p.name.replace(/'/g, "\\'");
-        const safeClass = p.class.replace(/'/g, "\\'");
-        const safeArrived = p.arrivedAt ? p.arrivedAt.replace(/'/g, "\\'") : '';
         
-        html += `
-            <li class="list-item pending">
-                <div class="student-info">
-                    <div class="student-name">${p.name}</div>
+        html += `<li class="list-item pending">
+            <div class="student-info">
+                <div class="student-name">${p.name}</div>
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap; margin-top:5px;">
                     <span class="student-class">${p.class}</span>
-                    <span class="wait-time">${waitTime} min</span>
-                    <div class="arrival-time"><i class="far fa-clock"></i> Arrived: ${p.arrivedAt || 'Just now'}</div>
+                    <span class="wait-time"><i class="far fa-clock"></i> ${waitTime} min</span>
                 </div>
-                <button class="btn btn-danger" onclick="showReleaseConfirmation('${key}', {name: '${safeName}', class: '${safeClass}', arrivedAt: '${safeArrived}'})">
-                    Release
+                <div class="arrival-time"><i class="far fa-calendar-check"></i> Arrived: ${p.arrivedAt || 'Just now'}</div>
+            </div>
+            <div class="action-buttons" style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button class="btn btn-release" onclick='showReleaseConfirmation("${key}", ${JSON.stringify(p).replace(/'/g, "\\'")})'>
+                    <i class="fas fa-check-circle"></i> Release
                 </button>
-            </li>
-        `;
+                <button class="btn btn-absent" onclick='showAbsentConfirmation("${key}", ${JSON.stringify(p).replace(/'/g, "\\'")})'>
+                    <i class="fas fa-calendar-times"></i> Absent
+                </button>
+            </div>
+        </li>`;
     });
-    
     list.innerHTML = html;
 }
 
-function renderReleasedList(releasedPickups) {
-    const list = document.getElementById('released-list');
+function renderHistoryList() {
+    const list = document.getElementById('history-list');
     if (!list) return;
-    
-    if (releasedPickups.length === 0) {
-        list.innerHTML = '<li class="empty-state"><i class="fas fa-history"></i><h3>No Released Students</h3></li>';
+
+    if (allHistoryItems.length === 0) {
+        list.innerHTML = '<li class="empty-state"><i class="fas fa-history"></i><h3>No History</h3><p>Released and absent students will appear here</p></li>';
         return;
     }
-    
-    releasedPickups.sort((a, b) => b[1].releasedAt - a[1].releasedAt);
+
+    let filtered = allHistoryItems;
+    if (historyFilter === 'released') {
+        filtered = allHistoryItems.filter(item => item && item.status === 'released');
+    } else if (historyFilter === 'absent') {
+        filtered = allHistoryItems.filter(item => item && item.status === 'absent');
+    }
+
+    if (teacherFilter !== 'all') {
+        filtered = filtered.filter(item => 
+            item && item.class && item.class.toLowerCase() === teacherFilter.toLowerCase()
+        );
+    }
+
+    filtered.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
     let html = '';
-    releasedPickups.forEach(([_, p]) => {
-        const releaseTime = p.releasedTime || new Date(p.releasedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        html += `
-            <li class="list-item released">
-                <div class="student-info">
-                    <div class="student-name">${p.name}</div>
-                    <span class="student-class released-class">${p.class}</span>
-                    <span class="released-time">Released</span>
-                    <div class="arrival-time"><i class="fas fa-check-circle"></i> ${releaseTime}</div>
+    filtered.forEach(item => {
+        if (!item) return;
+        const time = item.time || new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const isReleased = item.status === 'released';
+        
+        html += `<li class="list-item ${isReleased ? 'released' : 'absent-history'}">
+            <div class="student-info">
+                <div style="display:flex;align-items:center;gap:12px; margin-bottom:8px;">
+                    <div class="status-icon ${isReleased ? 'released-icon' : 'absent-icon'}" style="background: ${isReleased ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)'}; color: ${isReleased ? '#10b981' : '#ef4444'};">
+                        <i class="fas ${isReleased ? 'fa-check-circle' : 'fa-times-circle'}"></i>
+                    </div>
+                    <div>
+                        <div class="student-name">${item.name}</div>
+                        <span class="student-class" style="background: ${isReleased ? '#10b981' : '#ef4444'}">${item.class}</span>
+                    </div>
                 </div>
-            </li>
-        `;
+                <div style="display:flex;justify-content:space-between;align-items:center; margin-top:5px;">
+                    <span class="status-badge" style="background: ${isReleased ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)'}; color: ${isReleased ? '#10b981' : '#ef4444'}; border: 1px solid ${isReleased ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'};">
+                        <i class="fas ${isReleased ? 'fa-check-circle' : 'fa-times-circle'}"></i>
+                        ${isReleased ? 'Released' : 'Absent'}
+                    </span>
+                    <span class="history-time"><i class="far fa-clock"></i> ${time}</span>
+                </div>
+            </div>
+        </li>`;
     });
-    
     list.innerHTML = html;
 }
 
@@ -499,9 +676,9 @@ function renderReleasedList(releasedPickups) {
 function getYearColor(year) {
     if (year.includes('KG')) return '#f59e0b';
     if (year.includes('Year')) {
-        const yearNum = parseInt(year.replace(/\D/g, ''));
-        const colors = ['#3b82f6', '#10b981', '#8b5cf6', '#ec4899', '#ef4444', '#14b8a6', '#f97316', '#6366f1', '#6b7280'];
-        return colors[yearNum - 1] || '#64748b';
+        const num = parseInt(year.replace(/\D/g, ''));
+        const colors = ['#3b82f6', '#10b981', '#8b5cf6', '#ec4899', '#ef4444', '#14b8a6', '#f97316', '#6366f1', '#8b5cf6'];
+        return colors[num - 1] || '#64748b';
     }
     return '#64748b';
 }
@@ -509,84 +686,13 @@ function getYearColor(year) {
 function getYearIcon(year) {
     if (year.includes('KG')) return 'fa-child';
     if (year.includes('Year')) {
-        const yearNum = parseInt(year.replace(/\D/g, ''));
+        const num = parseInt(year.replace(/\D/g, ''));
         const icons = ['fa-star', 'fa-rocket', 'fa-flask', 'fa-book', 'fa-globe', 'fa-calculator', 'fa-flask', 'fa-music', 'fa-graduation-cap'];
-        return icons[yearNum - 1] || 'fa-user-graduate';
+        return icons[num - 1] || 'fa-user-graduate';
     }
     return 'fa-user-graduate';
 }
 
-// ==================== ACTIONS ====================
-window.markParentArrived = async function(name, className, year) {
-    try {
-        await set(push(ref(db, 'pendingPickups')), {
-            name, class: className, year,
-            timestamp: Date.now(),
-            arrivedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        });
-        showToast(`✅ ${name} marked`);
-    } catch (error) {
-        showToast('❌ Error', 'error');
-    }
-};
-
-window.undoMarkParent = async function(name) {
-    const pending = allPendingPickups.find(([_, p]) => p.name === name);
-    if (pending) {
-        await remove(ref(db, `pendingPickups/${pending[0]}`));
-        showToast(`↩️ Undo ${name}`);
-    }
-};
-
-async function releaseStudent(key, studentName) {
-    try {
-        const snapshot = await get(ref(db, `pendingPickups/${key}`));
-        if (snapshot.exists()) {
-            const data = snapshot.val();
-            data.releasedAt = Date.now();
-            data.releasedTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            
-            await set(ref(db, `releasedPickups/${key}`), data);
-            await remove(ref(db, `pendingPickups/${key}`));
-            
-            releasedStudentsToday.add(studentName);
-            localStorage.setItem(RELEASED_MEMORY_KEY, JSON.stringify([...releasedStudentsToday]));
-            showToast(`✅ ${studentName} released`);
-        }
-    } catch (error) {
-        showToast('❌ Error', 'error');
-    }
-}
-window.releaseStudent = releaseStudent;
-
-// ==================== REALTIME LISTENERS ====================
-onValue(ref(db, 'pendingPickups'), (snapshot) => {
-    const data = snapshot.val();
-    allPendingPickups = data ? Object.entries(data) : [];
-    
-    document.getElementById('active-pickups').textContent = allPendingPickups.length;
-    document.getElementById('pending-count').textContent = allPendingPickups.length;
-    
-    renderTeacherFilter();
-    renderFilteredPendingList();
-    renderStudentList();
-});
-
-onValue(ref(db, 'releasedPickups'), (snapshot) => {
-    const data = snapshot.val();
-    const releasedPickups = data ? Object.entries(data) : [];
-    
-    document.getElementById('released-today').textContent = releasedPickups.length;
-    
-    releasedStudentsToday.clear();
-    releasedPickups.forEach(([_, p]) => p.name && releasedStudentsToday.add(p.name));
-    localStorage.setItem(RELEASED_MEMORY_KEY, JSON.stringify([...releasedStudentsToday]));
-    
-    renderStudentList();
-    renderReleasedList(releasedPickups);
-});
-
-// ==================== UTILITIES ====================
 function showToast(message, type = 'success', duration = 3000) {
     const icons = {
         success: 'fa-check-circle',
@@ -607,55 +713,56 @@ function showToast(message, type = 'success', duration = 3000) {
 }
 
 // ==================== SEARCH ====================
-document.getElementById('student-search')?.addEventListener('input', (e) => {
-    const term = e.target.value.toLowerCase();
-    const list = document.getElementById('student-list');
-    if (!list) return;
-    
-    const filtered = STUDENTS.filter(s => 
-        !releasedStudentsToday.has(s.name) &&
-        (s.name.toLowerCase().includes(term) || s.class.toLowerCase().includes(term))
-    );
-    
-    if (filtered.length === 0) {
-        list.innerHTML = '<li class="empty-state"><i class="fas fa-users"></i><h3>No students found</h3></li>';
-        return;
-    }
-    
-    let html = '';
-    filtered.forEach(s => {
-        const isPending = allPendingPickups.some(([_, p]) => p.name === s.name);
-        html += `
-            <li class="list-item">
+const searchInput = document.getElementById('student-search');
+if (searchInput) {
+    searchInput.addEventListener('input', function(e) {
+        const term = e.target.value.toLowerCase();
+        const list = document.getElementById('student-list');
+        if (!list) return;
+
+        const filtered = STUDENTS.filter(s => 
+            !releasedStudentsToday.has(s.name) && !absentStudentsToday.has(s.name) &&
+            (s.name.toLowerCase().includes(term) || s.class.toLowerCase().includes(term))
+        );
+
+        if (filtered.length === 0) {
+            list.innerHTML = '<li class="empty-state"><i class="fas fa-users"></i><h3>No students found</h3></li>';
+            return;
+        }
+
+        let html = '';
+        filtered.forEach(s => {
+            const isPending = allPendingPickups.some(([_, p]) => p && p.name === s.name);
+            html += `<li class="list-item ${isPending ? 'pending-item' : ''}">
                 <div class="student-info">
                     <div style="display:flex;align-items:center;gap:12px">
-                        <div style="width:40px;height:40px;border-radius:50%;background:${getYearColor(s.year)}20;display:flex;align-items:center;justify-content:center">
+                        <div class="student-avatar" style="width:40px;height:40px;border-radius:50%;background:${getYearColor(s.year)}20;display:flex;align-items:center;justify-content:center">
                             <i class="fas fa-user-graduate" style="color:${getYearColor(s.year)}"></i>
                         </div>
                         <div>
                             <div class="student-name">${s.name}</div>
                             <span class="student-class" style="background:${getYearColor(s.year)}">${s.class}</span>
+                            ${isPending ? '<span class="pending-badge"><i class="fas fa-exclamation-circle"></i> Waiting</span>' : ''}
                         </div>
                     </div>
                 </div>
-                <div style="display:flex;gap:8px">
+                <div class="action-buttons" style="display:flex;gap:8px;flex-wrap:wrap;">
                     ${isPending ? `
-                        <button class="btn" style="background:#ef4444;color:white;min-width:80px" onclick="undoMarkParent('${s.name}')">
-                            <i class="fas fa-undo-alt"></i> UNDO
+                        <button class="btn btn-undo" onclick="undoMarkParent('${s.name}')">
+                            <i class="fas fa-undo-alt"></i> Undo
                         </button>
                     ` : ''}
-                    <button class="btn ${isPending ? 'btn-secondary' : 'btn-primary'}" 
-                        ${isPending ? 'disabled' : ''}
+                    <button class="btn ${isPending ? 'btn-disabled' : 'btn-arrived'}" 
+                        ${isPending ? 'disabled' : ''} 
                         onclick="markParentArrived('${s.name}', '${s.class}', '${s.year}')">
                         ${isPending ? '<i class="fas fa-clock"></i> Waiting' : '<i class="fas fa-user-check"></i> Parent Here'}
                     </button>
                 </div>
-            </li>
-        `;
+            </li>`;
+        });
+        list.innerHTML = html;
     });
-    
-    list.innerHTML = html;
-});
+}
 
 // ==================== SECTION SWITCHING ====================
 window.showSection = function(section) {
@@ -665,17 +772,54 @@ window.showSection = function(section) {
     document.getElementById(`${section}-section`).classList.add('active');
 };
 
+// ==================== REALTIME LISTENERS ====================
+onValue(ref(db, 'pendingPickups'), (snapshot) => {
+    const data = snapshot.val();
+    allPendingPickups = data ? Object.entries(data) : [];
+    
+    const activePickupsEl = document.getElementById('active-pickups');
+    const pendingCountEl = document.getElementById('pending-count');
+    if (activePickupsEl) activePickupsEl.textContent = allPendingPickups.length;
+    if (pendingCountEl) pendingCountEl.textContent = allPendingPickups.length;
+    
+    renderTeacherFilter();
+    renderFilteredPendingList();
+    renderStudentList();
+});
+
+onValue(ref(db, 'history'), (snapshot) => {
+    const data = snapshot.val();
+    allHistoryItems = data ? Object.values(data) : [];
+    
+    const releasedCount = allHistoryItems.filter(item => item && item.status === 'released').length;
+    const absentCount = allHistoryItems.filter(item => item && item.status === 'absent').length;
+    
+    const releasedEl = document.getElementById('released-today');
+    const absentEl = document.getElementById('absent-today');
+    const historyCountEl = document.getElementById('history-count');
+    
+    if (releasedEl) releasedEl.textContent = releasedCount;
+    if (absentEl) absentEl.textContent = absentCount;
+    if (historyCountEl) historyCountEl.textContent = allHistoryItems.length;
+    
+    renderHistoryFilter();
+    renderHistoryList();
+    renderStudentList(); // Update admin panel to remove processed students
+});
+
 // ==================== RESET FUNCTION ====================
 window.resetApp = async function() {
-    if (!confirm('⚠️ Reset for new day? This will clear all pending and released students.')) return;
-    
     try {
         await set(ref(db, 'pendingPickups'), null);
-        await set(ref(db, 'releasedPickups'), null);
+        await set(ref(db, 'history'), null);
         localStorage.removeItem(RELEASED_MEMORY_KEY);
+        localStorage.removeItem(ABSENT_MEMORY_KEY);
+        localStorage.removeItem('maarif_last_reset');
+        localStorage.removeItem('maarif_teacher_class');
         releasedStudentsToday.clear();
-        disabledStudentButtons.clear();
-        showToast('🔄 System reset for new day!');
+        absentStudentsToday.clear();
+        teacherFilter = 'all';
+        showToast('✅ System reset for new day!', 'success');
     } catch (error) {
         showToast('❌ Error resetting', 'error');
     }
@@ -685,10 +829,34 @@ window.resetApp = async function() {
 document.addEventListener('DOMContentLoaded', () => {
     console.log('App starting...');
     
-    document.getElementById('total-students').textContent = STUDENTS.length;
+    const totalStudentsEl = document.getElementById('total-students');
+    if (totalStudentsEl) totalStudentsEl.textContent = STUDENTS.length;
+    
     renderStudentList();
     renderTeacherFilter();
-    setupConfirmationDialog();
+    renderHistoryFilter();
+    setupConfirmationDialogs();
+    
+    // Update date/time display
+    updateDateTime();
+    setInterval(updateDateTime, 60000);
 });
 
-console.log('App ready with dropdown filter!');
+function updateDateTime() {
+    const now = new Date();
+    const options = { 
+        weekday: 'long', 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric',
+        hour: '2-digit', 
+        minute: '2-digit' 
+    };
+    
+    let el = document.getElementById('current-datetime');
+    if (el) {
+        el.innerHTML = `<i class="far fa-calendar-alt" style="color: var(--maarif-teal);"></i> ${now.toLocaleDateString('en-US', options)}`;
+    }
+}
+
+console.log('App ready with smooth UI, admin undo, and beautiful history panel!');
